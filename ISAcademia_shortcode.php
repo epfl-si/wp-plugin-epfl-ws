@@ -213,7 +213,7 @@ EOT;
                         '\n' +
                         '\nThis page <https://jahia.epfl.ch/external-content/automatic-course-list#faq-488738> summarize the option.' +
                         '\n' +
-                        'Finally, the source and documentation of this plugin are part of EPFL-WS, you can find help and participate here: <https://github.com/epfl-sti/wordpress.plugin.ws>\n' +
+                        'Finally, the source and documentation of this plugin are part of EPFL-WS, you can find help and participate here: <https://github.com/epfl-si/wp-plugin-epfl-ws>\n' +
                         '-->';
 
           function callback()

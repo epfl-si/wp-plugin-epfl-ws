@@ -1,7 +1,7 @@
 <?php
 /*
  * Plugin Name: EPFL Web Services and shortcodes
- * Plugin URI:  https://github.com/epfl-sti/wordpress.plugin.ws
+ * Plugin URI:  https://github.com/epfl-si/wp-plugin-epfl-ws
  * Description: Integrate EPFL Web Services on your WordPress site. Integrates with <a href="https://wordpress.org/plugins/wp-subtitle/">WP subtitle</a> if installed.
 
  * Version:     0.5
@@ -68,7 +68,7 @@ class EPFLWSmain {
 		echo '    </ul>';
 		echo '  </p>';
 		echo '  <p><u>Help, resources and contributing</u>:';
-		echo '  <p>Please visit the plugin\'s <a href="https://github.com/epfl-sti/wordpress.plugin.ws">GitHub repository</a> to get latest news, open <a href="https://github.com/epfl-sti/wordpress.plugin.ws/issues">issues</a>, <a href="https://github.com/epfl-sti/wordpress.plugin.ws/pulls">contribute</a> or ask <a href="https://github.com/epfl-sti/wordpress.plugin.ws/issues/new">question</a> to find help.</p>';
+		echo '  <p>Please visit the plugin\'s <a href="https://github.com/epfl-si/wp-plugin-epfl-ws">GitHub repository</a> to get latest news, open <a href="https://github.com/epfl-si/wp-plugin-epfl-ws/issues">issues</a>, <a href="https://github.com/epfl-si/wp-plugin-epfl-ws/pulls">contribute</a> or ask <a href="https://github.com/epfl-si/wp-plugin-epfl-ws/issues/new">question</a> to find help.</p>';
 		echo '</div>';
 	}
 

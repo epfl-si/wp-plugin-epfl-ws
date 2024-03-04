@@ -71,7 +71,7 @@ class OrganigrammeShortCode {
                         'To do so, just use the [organigramme unit=STI lang=en] shortcode where ever you want to display the organizational charts. ' +
                         '\n' +
                         '\n' +
-                        'Finally, the source and documentation of this plugin are part of EPFL-WS, you can find help and participate here: <https://github.com/epfl-sti/wordpress.plugin.ws>\n' +
+                        'Finally, the source and documentation of this plugin are part of EPFL-WS, you can find help and participate here: <https://github.com/epfl-si/wp-plugin-epfl-ws>\n' +
                         '-->';
 
           function callback()

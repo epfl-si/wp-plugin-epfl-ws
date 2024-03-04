@@ -105,7 +105,7 @@ class PeopleShortCode {
                         '\t- [people url=https://people.epfl.ch/cgi-bin/getProfiles?lang=en&unit=STI&subtree=1&nophone=1&function=professeur+ordinaire]\n' +
                         '\n' +
                         '\n' +
-                        'Finally, the source and documentation of this plugin are part of EPFL-WS, you can find help and participate here: <https://github.com/epfl-sti/wordpress.plugin.ws>\n' +
+                        'Finally, the source and documentation of this plugin are part of EPFL-WS, you can find help and participate here: <https://github.com/epfl-si/wp-plugin-epfl-ws>\n' +
                         '-->';
 
           function callback()

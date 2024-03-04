@@ -152,7 +152,7 @@ class ActuShortCode {
                         '"search", "title", "subtitle", "text" are search arguments you can use to get news across the school on, in example, keywords.\n' +
                         '\n' +
                         '\n' +
-                        'Finally, the source and documentation of this plugin are part of EPFL-WS, you can find help and participate here: <https://github.com/epfl-sti/wordpress.plugin.ws>\n' +
+                        'Finally, the source and documentation of this plugin are part of EPFL-WS, you can find help and participate here: <https://github.com/epfl-si/wp-plugin-epfl-ws>\n' +
                         '-->';
 
           function callback()
