@@ -1,0 +1,47 @@
+{
+  "name": "epfl-ws",
+  "version": "1.0.0",
+  "description": "The EPFL-WS WordPress plugin (PHP + Vue.js)",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "gulp",
+    "watch": "gulp watch"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/epfl-sti/wordpress.plugin.ws.git"
+  },
+  "author": "STI-IT Web <stiitweb@epfl.ch>",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/epfl-sti/wordpress.plugin.ws/issues"
+  },
+  "homepage": "https://github.com/epfl-sti/wordpress.plugin.ws#readme",
+  "devDependencies": {
+    "babel-core": "^6.26.3",
+    "babel-helper-vue-jsx-merge-props": "^2.0.3",
+    "babel-plugin-syntax-jsx": "^6.18.0",
+    "babel-plugin-transform-vue-jsx": "^3.7.0",
+    "babel-preset-env": "^1.7.0",
+    "babelify": "^8.0.0",
+    "gulp": "^3.9.1",
+    "gulp-bro": "^1.0.3",
+    "gulp-rename": "^1.2.3",
+    "gulp-sourcemaps": "^2.6.4",
+    "gulp-uglify": "^3.0.0",
+    "gulp-watch": "^5.0.0",
+    "node-sass": "^4.9.0",
+    "node-sass-tilde-importer": "^1.0.2",
+    "postcss-cssnext": "^3.1.0",
+    "unassertify": "^2.1.1",
+    "vue": "^2.5.16",
+    "vue-gettext": "^2.0.31",
+    "vueify": "^9.4.1"
+  },
+  "dependencies": {
+    "@fortawesome/fontawesome": "^1.1.8",
+    "@fortawesome/fontawesome-free-solid": "^5.0.13",
+    "@fortawesome/vue-fontawesome": "0.0.22",
+    "lodash": "^4.17.10"
+  }
+}

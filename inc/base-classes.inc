@@ -1,0 +1,2121 @@
+<?php
+
+/**
+ * A set of abstract base classes for Actu, Memento and more.
+ */
+
+namespace EPFL\WS\Base;
+
+if (! defined('ABSPATH')) {
+    die('Access denied.');
+}
+
+use \WP_Query;
+use \Exception;
+
+require_once(__DIR__ . "/i18n.inc");
+use function \EPFL\WS\___;
+use function \EPFL\WS\__x;
+
+require_once(__DIR__ . "/batch.inc");
+use function \EPFL\WS\run_every;
+use \EPFL\WS\BatchTask;
+
+require_once(__DIR__ . "/image-size.inc");
+use function \EPFL\WS\get_image_size;
+
+require_once(__DIR__ . "/auto-fields.inc");
+use \EPFL\WS\AutoFields;
+use \EPFL\WS\AutoFieldsController;
+
+require_once(__DIR__ . "/activation.inc");
+use function \EPFL\WS\plugin_activation_hook;
+use function \EPFL\WS\plugin_deactivation_hook;
+
+function _debug ($msg)
+{
+    // error_log($msg);
+}
+
+class UnicityException extends Exception {}
+
+/**
+ * A helper class to prepare and invoke custom WP_Query objects.
+ */
+class _WPQueryBuilder
+{
+    function __construct ($query)
+    {
+        if (is_string($query)) {
+            $query = array('post_type' => $query);
+        }
+        $this->query = $query;
+    }
+
+    function by_meta ($meta_array)
+    {
+        if (! $this->query["meta_query"]) {
+            $this->query["meta_query"] = array('relation' => 'AND');
+        }
+
+        foreach ($meta_array as $k => $v) {
+            array_push($this->query["meta_query"], array(
+                'key'     => $k,
+                'value'   => $v,
+                'compare' => '='
+            ));
+        }
+
+        return $this;
+    }
+
+    private $_saved_query;
+    function wp_query ()
+    {
+        if (! $this->query) {
+            throw new Exception("Can only call one of ->wp_query, ->result or ->results");
+        }
+        $retval = new WP_Query($this->query);
+        $this->_saved_query = $this->query;
+        unset($this->query);
+        return $retval;
+    }
+
+    function result ()
+    {
+        $results = $this->wp_query()->get_posts();
+        if (count($results) > 1) {
+            throw new UnicityException(sprintf(
+                "%s returned %d results (%s",
+                $this->moniker(), count($results),
+                var_export(array_map(function($post) { return $post->ID; }, $results),
+                          true)));
+        }
+        return $results[0];
+    }
+
+    function results ()
+    {
+        if (! $this->query["posts_per_page"]) {
+            $this->all();
+        }
+        return $this->wp_query()->get_posts();
+    }
+
+    function all ()
+    {
+        $this->query["posts_per_page"] = -1;
+        return $this;
+    }
+
+    function moniker ($set_it = null) {
+        if ($set_it !== null) {
+            $this->moniker = $set_it;
+            return $this;    // Chainable
+        } elseif ($this->moniker) {
+            return $this->moniker;
+        } else {
+            $q = ($this->query ? $this->query : $this->_saved_query);
+            return "<" . var_export($q, true) . ">";
+        }
+    }
+}
+
+/**
+ * Abstract base classes for taxonomies whose terms have an URL as metadata.
+ *
+ * A "taxonomy" is a complicated word for a way to organize WordPress
+ * posts together. Post types that are automatically scraped from some kind
+ * of API or Web service, belong to a taxonomy which is represented by
+ * a subclass of ScrapedTaxonomy (e.g. ActuStream, CourseTaxonomy etc.)
+ *
+ * Instances of these subclasses represent one so-called "term", that
+ * is, one API channel or feed with its initial URL.
+ */
+abstract class StreamTaxonomy
+{
+    /**
+     * @return The object class for WP posts this APIChannelTaxonomy applies to.
+     */
+    static abstract function get_post_class ();
+
+    /**
+     * @return The taxonomy slug (a unique keyword) used to
+     *         distinguish the terms of this taxonomy from all the
+     *         other ones in the WordPress database
+     */
+    static abstract function get_taxonomy_slug ();
+
+    /**
+     * @return A slug (unique keyword) used to associate the URL
+     *         metadata to objects of this class ("terms") in the
+     *         WordPress database
+     */
+    static abstract function get_term_meta_slug ();
+
+    /**
+     * Actually fetch data from @link get_url and create / update
+     * as many instances of @get_post_class as needed
+     */
+    abstract function sync ();
+
+    function __construct($term_or_term_id)
+    {
+        if (is_object($term_or_term_id)) {
+            $this->ID = $term_or_term_id->term_id;
+        } else {
+            $this->ID = $term_or_term_id;
+        }
+    }
+
+    static function get_all ()
+    {
+        $thisclass = get_called_class();
+        $all = array();
+        foreach (get_terms(array(
+            'taxonomy'   => $thisclass::get_taxonomy_slug(),
+            'hide_empty' => false
+        )) as $wp_term) {
+            if (is_wp_error($wp_term)) {
+                throw new Exception($wp_term->get_error_message());
+            } elseif (array_key_exists("invalid_taxonomy", $wp_term)) {
+                throw new Exception(sprintf(
+                    "get_terms() says %s is an invalid taxonomy",
+                    $thisclass::get_taxonomy_slug()));
+            }
+            array_push($all, new $thisclass($wp_term));
+        }
+        return $all;
+    }
+
+    function get_url ()
+    {
+        if (! $this->url) {
+            $this->url = get_term_meta( $this->ID, $this->get_term_meta_slug(), true );
+        }
+        return $this->url;
+    }
+
+    function set_url ($url)
+    {
+        $this->url = $url;
+        delete_term_meta($this->ID, $this->get_term_meta_slug());
+        add_term_meta($this->ID, $this->get_term_meta_slug(), $url);
+    }
+
+    function as_wp_term ()
+    {
+        return \WP_Term::get_instance($this->ID, $this->get_taxonomy_slug());
+    }
+
+    /**
+     * Mark in the database that $post was found by
+     * fetching from this stream object.
+     *
+     * This is materialized by a relationship in the
+     * wp_term_relationships SQL table, using the @link
+     * wp_set_post_terms API.
+     */
+    function set_ownership($post)
+    {
+        $terms = wp_get_post_terms(
+            $post->ID, $this->get_taxonomy_slug(),
+            array('fields' => 'ids'));
+        if (! in_array($this->ID, $terms)) {
+            wp_set_post_terms($post->ID, array($this->ID),
+                              $this->get_taxonomy_slug(),
+                              true);  // Append
+        }
+    }
+}
+
+/**
+ * Subclass to StreamTaxonomy for Actu and Memento streams
+ *
+ * This class just mixes in a @link sync method that uses ActuAPIClient.
+ */
+abstract class APIChannelTaxonomy extends StreamTaxonomy
+{
+    function sync ()
+    {
+        require_once (__DIR__ . "/ActuAPI.inc");
+        $client = new \EPFL\WS\Actu\ActuAPIClient($this);
+        foreach ($client->fetch() as $api_result) {
+            $post_class = $this->get_post_class();
+            $epfl_post = $post_class::sync($api_result);
+            $this->set_ownership($epfl_post);
+            $auto_category_ids = array_map(
+                function($cat) { return $cat->ID(); },
+                $this->get_auto_categories($epfl_post));
+            wp_set_post_categories($epfl_post->ID, $auto_category_ids,
+                                   /* $append = */ true);
+
+        }
+    }
+
+    /**
+     * @return A list of {@see WP_Term} instances
+     */
+    function get_auto_categories ($epfl_post)
+    {
+        // TODO: Implement using the Vue-edited state
+        return array();
+    }
+}
+
+/**
+ * Configuration UI and WP callbacks for a StreamTaxonomy class.
+ *
+ * A taxonomy is pretty much an end-user-invisible concept so much of the
+ * responsibility of this class is towards wp-admin. This class has
+ * no instances.
+ */
+abstract class StreamTaxonomyController
+{
+    /**
+     * @return The @link APIChannelTaxonomy subclass this controller serves.
+     */
+    abstract static function get_taxonomy_class ();
+
+    /**
+     * @return An URL to show as an example in the "URL" field of a new
+     * StreamTaxonomy instance being created in wp-admin
+     */
+    abstract static function get_placeholder_api_url ();
+
+    /**
+     * Get the labels to display in various places in the UI.
+     *
+     * @return An associative array whose keys are i18n-neutral
+     *         keywords and whose values are translation strings. This
+     *         array gets passed as-is as the 'labels' value to
+     *         WordPress' @link register_taxonomy, and therefore ought
+     *         to contain like-named keys. Additionally the following
+     *         keys are used by StreamTaxonomyController directly:
+     *
+     * - url_legend: A short label to display next to the
+     *               channel API URL field
+     *
+     * - url_legend_long: A longer explanatory text to display next to
+     *               the channel API URL field
+     *
+     */
+    abstract static function get_human_labels ();
+
+    static function hook ()
+    {
+        add_action('init', array(get_called_class(), '_do_register_taxonomy'));
+
+        $taxonomy_class = static::get_taxonomy_class();
+        run_every("StreamTaxonomyController-sync", 600,
+                  function () use ($taxonomy_class) {
+            foreach ($taxonomy_class::get_all() as $stream) {
+                $stream_name   = $stream->as_wp_term()->name;
+                $stream_slug   = $stream->as_wp_term()->slug;
+                $taxonomy_slug = $taxonomy_class::get_taxonomy_slug();
+                (new BatchTask())
+                    ->set_banner("Syncing $taxonomy_slug $stream_name ($stream_slug)")
+                    ->set_prometheus_labels(array(
+                            'kind' => $taxonomy_slug,
+                            'slug' => $stream_slug
+                        ))
+                    ->run(array($stream, "sync"));
+            }
+        });
+    }
+
+    /**
+     * Make the taxonomy of @link get_taxonomy_class exist.
+     */
+    static function _do_register_taxonomy ()
+    {
+        $taxonomy_class = static::get_taxonomy_class();
+        $taxonomy_slug = $taxonomy_class::get_taxonomy_slug();
+        $post_class = $taxonomy_class::get_post_class();
+        $post_slug = $post_class::get_post_type();
+        register_taxonomy(
+            $taxonomy_slug,
+            array($post_slug),
+            array(
+                'hierarchical'      => false,
+                'labels'            => static::get_human_labels(),
+                'show_ui'           => true,
+                'show_admin_column' => true,
+                'query_var'         => true,
+                'capabilities'      => array(
+                    // Cannot reassign channels from post edit screen:
+                    'assign_terms' => '__NEVER_PERMITTED__',
+                    // Default permissions apply for the other operations
+                ),
+                'rewrite'           => array( 'slug' => $taxonomy_slug ),
+            ));
+        add_action("${taxonomy_slug}_add_form_fields", array(get_called_class(), "render_form_fields_for_create"));
+        add_action( "${taxonomy_slug}_edit_form_fields", array(get_called_class(), "render_form_fields_for_update"), 10, 2);
+        add_action( "created_${taxonomy_slug}", array(get_called_class(), 'edited_channel'), 10, 2 );
+        add_action( "edited_${taxonomy_slug}", array(get_called_class(), 'edited_channel'), 10, 2 );
+    }
+
+    static function render_form_fields_for_create ($unused_taxonomy_slug)
+    {
+        self::render_channel_widget(array("placeholder" => static::get_placeholder_api_url(), "size" => 40, "type" => "text"));
+    }
+
+    static function _get_wp_admin_label ($key)
+    {
+        $labels = static::get_human_labels();
+        if (array_key_exists($key, $labels)) {
+            return $labels[$key];
+        }
+        $default_labels = array(
+            "url_legend" => ___("Channel API URL"),
+            "url_legend_long" => ___("Source URL of the JSON data."),
+        );
+        return $default_labels[$key];
+    }
+
+    static function render_form_fields_for_update ($term, $unused_taxonomy_slug)
+    {
+        $taxonomy_class = static::get_taxonomy_class();
+        $current_url = (new $taxonomy_class($term))->get_url();
+        ?><tr class="form-field epfl-ws-channel-url-wrap">
+            <th scope="row">
+                <label for="<?php echo self::CHANNEL_WIDGET_URL_SLUG ?>">
+                    <?php echo self::_get_wp_admin_label("url_legend"); ?>
+                </label>
+            </th>
+            <td>
+                <input id="<?php echo self::CHANNEL_WIDGET_URL_SLUG; ?>" name="<?php echo self::CHANNEL_WIDGET_URL_SLUG; ?>" type="text" size="40" value="<?php echo $current_url; ?>" />
+                <p class="description"><?php echo self::_get_wp_admin_label("url_legend_long"); ?></p>
+            </td>
+        </tr>
+        <tr id="auto-category-widget"></tr>
+        <?php
+    }
+
+    const CHANNEL_WIDGET_URL_SLUG = 'epfl_channel_url';
+
+    static function render_channel_widget ($input_attributes)
+    {
+      ?><div class="form-field term-wrap">
+        <label for="<?php echo self::CHANNEL_WIDGET_URL_SLUG ?>"><?php echo self::_get_wp_admin_label("url_legend"); ?></label>
+        <input id="<?php echo self::CHANNEL_WIDGET_URL_SLUG ?>" name="<?php echo self::CHANNEL_WIDGET_URL_SLUG ?>" <?php
+           foreach ($input_attributes as $k => $v) {
+               echo "$k=" . htmlspecialchars($v) . " ";
+           }?> />
+       </div><?php
+    }
+
+    static function edited_channel ($term_id, $tt_id)
+    {
+        $taxonomy_class = static::get_taxonomy_class();
+        $stream = new $taxonomy_class($term_id);
+        $stream->set_url($_POST[self::CHANNEL_WIDGET_URL_SLUG]);
+
+        // #expletivedeleted "magic" quotes have been spraying
+        // backslashes into our JSON - If not by PHP, then by
+        // WordPress itself (@see wp_magic_quotes).
+        $rules = json_decode(stripslashes($_POST["rules"]));
+        // TODO: interpret $rules
+        if ($_POST["testing"]) {
+            error_log(var_export($rules, true)); // XXX
+            return;
+        }
+        $stream->sync();
+    }
+}
+
+/**
+ * Abstract base class for posts
+ *
+ * Since WP_Post is final (https://core.trac.wordpress.org/ticket/24672),
+ * the next best thing is a has-a relationship.
+ */
+abstract class Post
+{
+   /**
+    * Subclasses should define this method to return a Boolean
+    * indicating whether $this->ID points to a "real" instance
+    * of said subclass.
+    */
+    abstract protected function _belongs ();
+
+    /**
+     * Protected constructor
+     */
+    protected function __construct ($id)
+    {
+        $this->ID = $id;
+    }
+
+    /**
+     * Wrap one WP_Post in a Post instance
+     *
+     * @return an instance of this class or null
+     */
+    static function get ($post_or_post_id)
+    {
+        if (is_object($post_or_post_id)) {
+            $post_id = $post_or_post_id->ID;
+        } else {
+            $post_id = $post_or_post_id;
+        }
+
+        $theclass = get_called_class();
+        $that = new $theclass($post_id);
+        if (is_object($post_or_post_id)) {
+            $that->_wp_post = $post_or_post_id;
+        }
+        if (! $that->_belongs()) { return; }
+        return $that;
+    }
+
+    function wp_post ()
+    {
+        if (! $this->_wp_post) {
+            $this->_wp_post = get_post($this->ID);
+        }
+        return $this->_wp_post;
+    }
+}
+
+/**
+ * Abstract base class for posts that belong to a custom post type
+ */
+abstract class TypedPost extends Post
+{
+    /**
+     * @return the post_type slug for instances of this class
+     */
+    static abstract function get_post_type ();
+
+    function _belongs ()
+    {
+        return ($this->wp_post()->post_type ===
+                get_called_class()::get_post_type());
+    }
+
+    /**
+     * Iterate with $callback over all instances of this class.
+     *
+     * @param $callback A callable that will be called with each
+     * instance of this class in turn. The WordPress global variables
+     * will be updated as if within "The loop".
+     */
+    public static function foreach ($callback)
+    {
+        $all = (new _WPQueryBuilder(static::get_post_type()))->all()->wp_query();
+        $in_the_loop = new _InTheLoopHelper($all);
+        try {
+            $in_the_loop->enter();
+
+            while ($all->have_posts()) {
+                $all->next_post();
+                if ($epfl_post = static::get($all->post)) {
+                    call_user_func($callback, $epfl_post);
+                }
+            }
+        } finally {
+            $in_the_loop->leave();
+        }
+    }
+}
+
+/**
+ * A class of Posts that can be referenced by some other kind of
+ * unique key than the WordPress post ID.
+ *
+ * The class provides "named constructors"
+ * @link _get_by_unique_key and @link _get_or_create (in addition to
+ * the parent class' @link get) which implement fetching/creating
+ * objects from an associative array containing the unique key,
+ * possiby composite (i.e. comprised of one or more keys and values).
+ */
+abstract class UniqueKeyTypedPost extends TypedPost
+{
+    /**
+     * Retrieve one post per its unique key components.
+     *
+     * @param $unique_keys A data structure uniquely identifying the
+     *                     post to fetch from the database. In the
+     *                     base class, an array of "custom fields"
+     *                     ("meta" in WordPress parlance) is expected;
+     *                     see @link _query_by_unique_keys for detais
+     *                     (and a way to change that in a subclass).
+     */
+    static protected function _get_by_unique_key ($unique_keys)
+    {
+        $result = static::_query_by_unique_keys($unique_keys)->result();
+        if (! $result) return null;
+        $theclass = get_called_class();
+        return new $theclass($result->ID);
+    }
+
+    /**
+     * The "search" semantics of the $unique_keys parameter to
+     * @link _get_by_unique_key
+     *
+     * This method is supposed to mutate $q to restrict the search to
+     * the one post object that has $unique_keys as its unique key (or
+     * composite unique key). The base class provides an implementation
+     * based on WordPress' "meta" a.k.a. "custom fields": that is,
+     * $unique_keys is assumed to be an array whose keys could be passed
+     * as the second argument to @link get_post_meta, and whose values
+     * would be the corresponding return values of same `get_post_meta`.
+     * However, a class that overrides _query_by_unique_keys could change
+     * the semantics of $unique_keys in any way it pleases. (See also @link
+     * _insert_by_unique_keys for the write case.)
+     *
+     * @param $unique_keys Passed unmodified from @link _get_by_unique_key or
+     *                     @link _get_or_create
+     *
+     * @return An instance of @link _WPQueryBuilder that returns only the
+     *         target post
+     *
+     */
+    static protected function _query_by_unique_keys($unique_keys)
+    {
+        return (new _WPQueryBuilder(static::get_post_type()))->by_meta($unique_keys);
+    }
+
+    /**
+     * Like @link _get_by_unique_key, except create a new WordPress
+     * post if @link _get_by_unique_key yields no results.
+     *
+     * @param $unique_keys Same as in @link _get_by_unique_key - Again,
+     *                     the base class assumes an array of "meta"
+     *                     (a.k.a. "custom fields"), but by overriding
+     *                     @link _insert_by_unique_keys in a subclass
+     *                     one could use another data structure
+     */
+    static protected function _get_or_create ($unique_keys)
+    {
+        $that = static::_get_by_unique_key($unique_keys);
+        if ($that !== null) { return $that; }
+
+        $theclass = get_called_class();
+        return new $theclass(static::_insert_by_unique_keys($unique_keys));
+    }
+
+    /**
+     * The "insert" semantics of the $unique_keys parameter to @link _get_or_create
+     *
+     * This method can be overridden in a subclass to do to @link _get_or_create
+     * as overriding @link _query_by_unique_keys does to @link _get_by_unique_key.
+     * The base class interprets $unique_keys as an array of WordPress "meta"
+     * (a.k.a. "custom fields") names and values.
+     *
+     * Base and overridden implementations shall call `wp_insert_post`
+     * or similar and guarantee that once _insert_by_unique_keys
+     * returns, the unique key be already written in full to the
+     * WordPress data store (i.e., a subsequent call to @link
+     * _get_by_unique_key with the same $unique_keys should retrieve
+     * the same WordPress post).
+     *
+     * @param $unique_keys Passed unmodified from @link _get_or_creata
+     *
+     * @return The newly created post ID as an integer
+     */
+    static protected function _insert_by_unique_keys ($unique_keys) {
+        $theclass = get_called_class();
+        return wp_insert_post(array(
+            "post_type"   => $theclass::get_post_type(),
+            "post_status" => "publish",
+            "meta_input"  => $unique_keys));
+    }
+}
+
+/**
+ * A helper to help us pretend that we are @link in_the_loop .
+ *
+ * While there is no telling whether being "in the loop" will help us
+ * in any way whatsoever with procuring sex and/or drugs, it does help
+ * with WordPress avoiding a so-called "N+1 query problem" with
+ * thumbnails.
+ *
+ * To wit, post-thumbnail-template.php has code that goes like
+ *
+ * 		if ( in_the_loop() )
+ *			update_post_thumbnail_cache();
+ *
+ * This means a contrario that when not in_the_loop(), each and every
+ * call to get_the_post_thumbnail() and friends, results in a new
+ * query to the database.
+ *
+ * @see https://secure.phabricator.com/book/phabcontrib/article/n_plus_one/
+ * @see https://www.reddit.com/r/OutOfTheLoop/
+ */
+class _InTheLoopHelper
+{
+    /**
+     * Prepare to pretend that $wp_query is the main query (which is what
+     * in_the_loop() checks).
+     */
+    function __construct ($wp_query)
+    {
+        $this->wp_query = $wp_query;
+    }
+
+    /**
+     * Start pretending to be in the loop.
+     */
+    function enter ()
+    {
+        $this->_in_the_loop_orig = $this->wp_query->in_the_loop;
+        $this->wp_query->in_the_loop = true;
+
+        global $wp_query;
+        $this->_wp_query_orig = $wp_query;
+        $wp_query = $this->wp_query;
+    }
+
+    /**
+     * Stop pretending to be in the loop and restore all state (both
+     * global and in the $wp_query object passed to the constructor)
+     * as it was before @link enter.
+     *
+     * Should be called from a "finally" block.
+     */
+    function leave ()
+    {
+        $this->wp_query->in_the_loop = $this->_in_the_loop_orig;
+
+        global $wp_query;
+        $wp_query = $this->_wp_query_orig;
+    }
+}
+
+/**
+ * Abstract base class for Actu and Memento posts
+ *
+ * This class is for creating and continuously syncing "epfl-actu" and
+ * "epfl-memento" custom post types out of the corresponding EPFL Web
+ * services. Subclasses @link Actu and @link Memento exist and
+ * override suitable "protected virtual" methods to account for the
+ * slight differences existing between both APIs.
+ *
+ * There is one instance of this class for every unique piece of news
+ * or event (identified, in the sense of @link _get_by_unique_key
+ * / @link _get_or_create, by their "news_id"/"event_id" and
+ * "language"/"lang" API fields).
+ */
+
+abstract class APIChannelPost extends UniqueKeyTypedPost
+{
+    /**
+     * @return The picture URL
+     */
+    static abstract function extract_image_url ($api_result);
+
+    const API_ID_META   = "api_id";
+    const HOMEPAGE_META = "absolute_slug";
+    const LANGUAGE_META = "language";
+
+    function get_api_id () {
+        return get_post_meta($this->ID, self::API_ID_META, true);
+    }
+
+    function get_language () {
+        return get_post_meta($this->ID, self::LANGUAGE_META, true);
+    }
+
+    /**
+     * Extract as much information as desired from $api_result and
+     * stash it into $this->_post_meta.
+     *
+     * The base class only picks "absolute_slug" out of $api_result.
+     * Subclasses are expected to pick up additional fields.
+     *
+     * See also @link _update_image_meta which is ran after
+     * _update_post_meta.
+     */
+    protected function _update_post_meta ($api_result)
+    {
+        $this->_post_meta[self::API_ID_META]         = $this->_extract_api_id($api_result);
+        $this->_post_meta[self::HOMEPAGE_META]       = $api_result["absolute_slug"];
+        // So technically we've been through a decode/encode cycle and
+        // we all know how harsh PHP can be to JSON... But we just want
+        // to keep as much metadata as possible.
+        $this->_post_meta["json_bkp"] = json_encode($api_result);
+    }
+
+    /**
+     * @return the value of the "post_content" standard (non-meta) WordPress field.
+     */
+    abstract protected function extract_content ($api_result);
+
+    /**
+     * @return the value of the "post_title" standard (non-meta) WordPress field.
+     *
+     * Both APIs happen to use the same field, however this method is
+     * singled out for overloading in case of need.
+     */
+    protected function extract_title ($api_result)
+    {
+        return $api_result["title"];
+    }
+
+    /**
+     * @return the value of the "post_excerpt" standard (non-meta) WordPress
+     * field.
+     *
+     * The base class does nothing. If your API has excerpts (e.g.,
+     * Actu), override in the subclass.
+     */
+    protected function extract_excerpt ($api_result) {
+        return null;
+    }
+
+    /**
+     * Populated piecemeal at @link sync time by the various
+     * _update_* and _set_* methods; fetched all at once by
+     * @link _get_post_meta
+     */
+    protected $_post_meta;
+
+    const THUMBNAIL_META  = "epfl_external_thumbnail";
+
+    /**
+     * Create or update an instance from $api_result
+     *
+     * @param $api_result One of the API results returned by
+     *        {@see ActuAPIClient#fetch}
+     *
+     * @return The object instance that corresponds to the unique keys
+     *         present in $api_result
+     */
+    static function sync ($api_result)
+    {
+        $api_id = static::_extract_api_id($api_result);
+        $lang   = static::_extract_language($api_result);
+        if (! ($api_id && $lang)) {
+            throw new Exception("Invalid API result: " . var_export($api_result, true));
+        }
+        $that = static::_get_or_create(array(
+            self::API_ID_META   => $api_id,
+            self::LANGUAGE_META => $lang));
+        $that->_sync($api_result);
+        return $that;
+    }
+
+    /**
+     * Overridden to use Polylang to search by language (if available)
+     *
+     * Doing this greatly reduces the damage when a misconfigured
+     * Polylang starts syncing all the meta keys between translations
+     * of the same article — At least, said damage is now reversible.
+     * (If Polylang is not available, use the "language" meta instead.)
+     */
+    static protected function _query_by_unique_keys ($unique_keys)
+    {
+        if (! static::_is_polylang_enabled_on_custom_post_type()) {
+            return parent::_query_by_unique_keys($unique_keys);
+        }
+        $lang = $unique_keys[self::LANGUAGE_META];
+        unset($unique_keys[self::LANGUAGE_META]);
+        $q = parent::_query_by_unique_keys($unique_keys);
+        $q->query["lang"] = $lang;
+        return $q;
+    }
+
+    /**
+     * Overridden to set the Polylang language of newly created posts
+     * in-database
+     *
+     * @see _query_by_unique_keys
+     */
+    static protected function _insert_by_unique_keys ($unique_keys)
+    {
+        $id = parent::_insert_by_unique_keys($unique_keys);
+        pll_set_post_language($id, $unique_keys[self::LANGUAGE_META]);
+        return $id;
+    }
+
+    public function _is_polylang_enabled_on_custom_post_type ()
+    {
+        global $polylang;
+        if ($polylang && ($types = $polylang->model->get_translated_post_types())) {
+            return (array_search(static::get_post_type(), $types) !== false);
+        } else {
+            return false;
+        }
+    }
+
+    public function _sync ($api_result)
+    {
+        $this->_post_meta = array();
+
+        // "absolute_slug" is common to both "Jahia"-style APIs
+        $this->_post_meta["absolute_slug"] = $api_result["absolute_slug"];
+        $lang = $this->_extract_language($api_result);
+        $this->_post_meta[self::LANGUAGE_META] = $lang;
+
+        $this->_update_post_meta($api_result);
+        $this->_update_image_meta($api_result);
+
+        $update_post_args = array(
+            "ID"            => $this->ID,
+            "post_type"     => $this->get_post_type(),
+            "post_title"    => $this->extract_title($api_result),
+            "post_content"  => $this->extract_content($api_result),
+            "meta_input"    => $this->_post_meta
+        );
+
+        $excerpt = $this->extract_excerpt($api_result);
+        if ($excerpt) {
+            $update_post_args["post_excerpt"] = $excerpt;
+        }
+
+        wp_update_post($update_post_args);
+        AutoFields::of(get_called_class())->append(array_keys($this->_post_meta));
+
+        // Polylang
+        if (function_exists("pll_set_post_language")) {
+            pll_set_post_language($this->ID, $lang);
+        }
+        if (function_exists("pll_save_post_translations") &&
+            count($translations = $this->_get_translations()))
+        {
+            pll_save_post_translations($translations);
+        }
+    }
+
+    private static function _extract_language ($api_result)
+    {
+        return ($api_result["language"] ? $api_result["language"] :
+                $api_result["lang"]);
+    }
+
+    private static function _extract_api_id ($api_result)
+    {
+        /* /api/jahia has "news_id" or "event_id" for Actu resp.
+         * Memento; /api/v1 uses just "id" everywhere. Splitting these
+         * 5 lines into overloaded subclasses, in the immortal words
+         * of William Irwin on LKML, seems like throwing half the frog
+         * into the blender. So here you have the whole frog instead:
+         * (@link https://lwn.net/Articles/8779/)
+         */
+        foreach (array("news_id", "event_id", "id") as $field) {
+            if ($api_result[$field]) {
+                return $api_result[$field];
+            }
+        }
+        return NULL;
+    }
+
+    protected function _get_post_meta ()
+    {
+        if (! $this->_post_meta) {
+            $this->_post_meta = array();
+            foreach (get_post_meta($this->ID) as $key => $array) {
+                // All meta keys are single-valued
+                $this->_post_meta[$key] = $array[0];
+            }
+        }
+        return $this->_post_meta;
+    }
+
+    protected function _get_translations ()
+    {
+        $translations = array();
+        $q = new _WPQueryBuilder($this->get_post_type());
+        foreach ($q->by_meta(array(self::API_ID_META => $this->get_api_id()))->results()
+                 as $post) {
+            $lang = static::get($post)->get_language();
+            if ($lang) {
+                $translations[$lang] = $post->ID;
+            }
+        }
+        return $translations;
+    }
+
+    const MAX_HEIGHT_META = "epfl_external_img_max_height";
+    const MAX_WIDTH_META  = "epfl_external_img_max_width";
+
+    function get_max_size ()
+    {
+        $meta = $this->_get_post_meta();
+        if ($meta[self::MAX_HEIGHT_META] &&
+            $meta[self::MAX_WIDTH_META]) {
+            return array("height" => $meta[self::MAX_HEIGHT_META],
+                         "width"  => $meta[self::MAX_WIDTH_META]);
+        } else {
+            return null;
+        }
+    }
+
+    /**
+     * Extract the image-related metadata from $api_result and
+     * stash them into $this->_post_meta.
+     *
+     * The base class obtains and stashes the thumbnail from @link
+     * extract_image_url, and then probes the maximum image size
+     * server-side (see @link get_image_url for details on this
+     * feature of EPFL Actu and Memento). Subclasses may decide to
+     * override the method if they know better what image to use.
+     *
+     */
+    protected function _update_image_meta ($api_result)
+    {
+        if (! ($image_url = $this->extract_image_url($api_result))) {
+            _debug("Cannot extract image for post ID " . $this->ID);
+            return;
+        }
+        $this->_set_thumbnail_url($image_url);
+        $extra_big_image_url = $this->get_image_url("8000x6000");
+        if (! $extra_big_image_url) {
+            _debug(sprintf("Post %d: unable to scale %s", $this->ID, $image_url));
+            return;
+        }
+        $max_size = get_image_size($extra_big_image_url);
+        $this->_post_meta[self::MAX_HEIGHT_META] = $max_size["height"];
+        $this->_post_meta[self::MAX_WIDTH_META]  = $max_size["width"];
+        return $image_url;
+    }
+
+    /**
+     * @return the URL for a server-side resized image of $size
+     *
+     * @param $size e.g. "1024x768". If omitted, utilize the thumbnail
+     *        size as returned by the API.
+     */
+    function get_image_url ($size = null)
+    {
+        $url = $this->_get_post_meta()[self::THUMBNAIL_META];
+        if (! $url) {
+            _debug("No " . self::THUMBNAIL_META . " found for post ID " . $this->ID);
+            return null;
+        }
+        if (! $size) return $url;
+        $matched = array();
+        if (preg_match("/^(.*)\/(\d+x\d+)\.([a-zA-z]{1,6})$/", $url, $matched)) {
+            return sprintf("%s/%s.%s", $matched[1], $size, $matched[3]);
+        } else {
+            return $url;
+        }
+    }
+
+    /**
+     * The opposite of @link get_image_url when called without arguments
+     *
+     * To be called from an _update_* method only.
+     */
+    protected function _set_thumbnail_url ($url)
+    {
+        $this->_post_meta[self::THUMBNAIL_META] = $url;
+    }
+
+    function get_permalink ()
+    {
+        $meta = $this->_get_post_meta();
+        return $meta["absolute_slug"];
+    }
+}
+
+/**
+ * Abstract base class for all controller classes
+ */
+abstract class Controller
+{
+    /**
+     * Arrange for a nonfatal error to be shown in a so-called "admin notice."
+     */
+    static protected function admin_error ($post_id, $text)
+    {
+        // Use "Saving It in a Transient" technique from
+        // https://www.sitepoint.com/displaying-errors-from-the-save_post-hook-in-wordpress/
+        set_transient(
+            self::get_error_transient_key($post_id),
+            $text,
+            45);  // Seconds before it self-destructs
+    }
+
+    static private function get_error_transient_key ($post_id)
+    {
+        return sprintf("epfl-admin-notices_%d_%d",
+                       $post_id, get_current_user_id());
+    }
+
+    static function _render_admin_errors_if_any ()
+    {
+        global $post_id;
+        $key = Controller::get_error_transient_key ($post_id);
+        if ($error = get_transient($key)) {
+            delete_transient($key);
+            ?>
+    <div class="notice notice-error is-dismissible">
+        <p><?php echo $error; ?></p>
+    </div><?php
+        }
+    }
+}
+
+add_action('admin_notices',
+           array(Controller::class, '_render_admin_errors_if_any'));
+
+/**
+ * Abstract base class for the controller of a model class that
+ * consists of a custom post type that itself derives from abstract
+ * class @link TypedPost.
+ *
+ * This is a "pure static" class; no instances are ever constructed.
+ *
+ */
+abstract class CustomPostTypeController extends Controller
+{
+    /**
+     * @return The model class for this controller
+     */
+    abstract static function get_model_class ();
+
+    static function hook ()
+    {
+        add_action("admin_enqueue_scripts", array(get_called_class(), "_editor_css"));
+    }
+
+    static function _editor_css ($hook)
+    {
+        if (! ('post.php' === $hook &&
+               static::get_model_class()::get($_GET["post"])) ) return;
+        wp_register_style(
+            'ws-editor',
+            plugins_url( 'ws-editor.css', __DIR__ ) );
+        wp_enqueue_style('ws-editor');
+    }
+
+    static $_columns;
+    /**
+     * Add or mutate a column in the WP_List_Table list view in wp-admin
+     *
+     * @return an instance of @link _CustomPostTypeControllerColumn
+     */
+    static function column ($slug) {
+        if (! static::$_columns[$slug]) {
+            $_columns[$slug] = new _CustomPostTypeControllerColumn
+                             (get_called_class(), $slug);
+        }
+        return $_columns[$slug];
+    }
+
+    function get_post_type ()
+    {
+        $model_class = static::get_model_class();
+        return $model_class::get_post_type();
+    }
+
+    /**
+     * Add a column in the list view that shows thumbnails
+     */
+    static function add_thumbnail_column ()
+    {
+        static::column("thumbnail")
+            ->set_title(___( 'Thumbnail' ))
+            // Use of static::render_thumbnail_column() is the default
+            ->add_css("
+td.column-thumbnail img {
+    max-width: 100%;
+    height: auto;
+}
+")
+            ->hook_after(1);
+    }
+
+    /**
+     * Echo what should be in the relevant <td> in the thumbnail column.
+     *
+     * The base class echoes a single <img> tag. Subclasses might want
+     * to echo something instead of, or in addition to that.
+     *
+     * @param $epfl_post An instance of the class returned by @link
+     * get_model_class
+     */
+    static function render_thumbnail_column ($epfl_post)
+    {
+        $img = get_the_post_thumbnail($epfl_post);
+        if (! $img) return;
+        echo $img;
+    }
+
+    static $_syncing_on_save = null;
+    /**
+     * Call ->sync() upon saving a TypedPost object.
+     *
+     * Call this method from the initialization code (e.g. a `hook`
+     * method) in order to enable this functionality for all instances
+     * of the @link get_model_class.
+     */
+    static function call_sync_on_save ()
+    {
+        $model_class = static::get_model_class();
+        add_action(
+            'save_post',  // *Not* save_post_$post_type, so that one
+                          // may ::call_sync_on_save() also from
+                          // within a save_meta_box_foo method
+            function ($post_id, $post, $is_update) use ($model_class) {
+                return;  // XXX
+                $model_obj = $model_class::get($post);
+                if (! $model_obj) return;
+                if (CustomPostTypeController::$_syncing_on_save === $post_id) {
+                    return;  // Break out of possible recursion
+                }
+                $syncing_on_save_orig = CustomPostTypeController::$_syncing_on_save;
+                try {
+                    CustomPostTypeController::$_syncing_on_save = $post_id;
+                    $model_obj->sync();
+                } finally {
+                    CustomPostTypeController::$_syncing_on_save = $syncing_on_save_orig;
+                };
+            }, 10, 3);
+    }
+
+    static function add_editor_css ($css)
+    {
+        add_action('admin_head', function () use ($css) {
+            echo "<style>$css</style>";
+        });
+    }
+
+    /**
+     * Hook the meta box business for this class.
+     *
+     * Intended to be called from the hook() method of a Controller that
+     * uses meta boxes.
+     *
+     * Note: calling this class method is necessary, but typically not
+     * sufficient, to enable metabox functionality. One must also call
+     * @link add_meta_box once or more, typically from the
+     * `register_meta_box_cb` callback passed to @link
+     * register_post_type.
+     */
+    static function hook_meta_boxes ()
+    {
+        add_action('edit_form_after_title',
+                   array(get_called_class(), 'meta_boxes_above_editor'));
+        add_action( 'edit_form_after_editor',
+                   array(get_called_class(), 'meta_boxes_after_editor'));
+        add_action(sprintf('save_post_%s', static::get_post_type()),
+                   array(get_called_class(), 'save_meta_boxes'), 10, 3);
+    }
+
+    /**
+     * Render all meta boxes configured to show up above the editor.
+     */
+    static function meta_boxes_above_editor ($post)
+    {
+        if ($post->post_type !== static::get_post_type()) return;
+        do_meta_boxes(get_current_screen(), 'above-editor', $post);
+    }
+
+    /**
+     * Render all meta boxes configured to show up after the editor.
+     */
+    static function meta_boxes_after_editor ($post)
+    {
+        if ($post->post_type !== static::get_post_type()) return;
+        do_meta_boxes(get_current_screen(), 'after-editor', $post);
+    }
+
+    /**
+     * Simpler version of the WordPress add_meta_box function
+     *
+     * @param $slug Unique name for this meta box. The render function
+     * is the method called "render_meta_box_$slug", and the save function
+     * is the method called "save_meta_box_$slug" (for the latter see
+     * @link save_meta_boxes)
+     *
+     * @param $title The human-readable title for the meta box
+     *
+     * @param $position The position to render the meta box at;
+     *        defaults to "above-editor" (see @link meta_boxes_above_editor).
+     *        Can be set to any legal value for the $priority argument
+     *        to the WordPress add_meta_box function, in particular "default"
+     *        to render the meta box after the editor.
+     */
+    static function add_meta_box ($slug, $title, $position = 'above-editor')
+    {
+        $callback = array(get_called_class(), "render_meta_box_$slug");
+        $meta_box_name = sprintf("%s-nonce-meta_box_%s", static::get_post_type(), $slug);
+        add_meta_box($meta_box_name, $title,
+                     function () use ($meta_box_name, $callback) {
+                         wp_nonce_field($meta_box_name, $meta_box_name);
+                         global $post;
+                         call_user_func($callback, $post);
+                     },
+                     null, $position);
+    }
+
+    static private $saved_meta_boxes = array();
+    /**
+     * Call the save_meta_box_$slug method for any and all meta box that is
+     * posting information.
+     *
+     * Any and all nonces present in $_REQUEST, for which a corresponding
+     * class method exists, are checked; then the class method is called,
+     * unless already done in this request cycle.
+     */
+    static function save_meta_boxes ($post_id, $post, $is_update)
+    {
+        // Bail if we're doing an auto save
+        if (defined( 'DOING_AUTOSAVE' ) && \DOING_AUTOSAVE) return;
+        foreach ($_REQUEST as $k => $v) {
+            $matched = array();
+            if (preg_match(sprintf('/%s-nonce-meta_box_([a-zA-Z0-9_]+)$/',
+                                   static::get_post_type()),
+                           $k, $matched)) {
+                $save_method_name = "save_meta_box_" . $matched[1];
+                if (method_exists(get_called_class(), $save_method_name)) {
+                    if (! wp_verify_nonce($v, $k)) {
+                        wp_die(___("Nonce check failed"));
+                    } elseif (! current_user_can('edit_post')) {
+                        wp_die(___("Permission denied: edit " . static::get_post_type()));
+                    } elseif (self::$saved_meta_boxes[$k]) {
+                        // Break out of silly recursion: we call
+                        // writer functions such as wp_insert_post()
+                        // and wp_update_post(), which call us back
+                        return;
+                    } else {
+                        self::$saved_meta_boxes[$k] = true;
+                        call_user_func(
+                            array(get_called_class(), $save_method_name),
+                            $post_id, $post, $is_update);
+                    }
+                }
+            }
+        }  // End foreach
+    }
+}
+
+/**
+ * A custom column in the WP_List_Table view
+ */
+class _CustomPostTypeControllerColumn
+{
+    /**
+     * "private" constructor, call ::column() in your
+     * @link CustomPostTypeController subclass instead.
+     */
+    function __construct ($owner_controller, $slug)
+    {
+        $this->owner = $owner_controller;
+        $this->slug  = $slug;
+
+        // Default settings:
+        $this->set_title($slug);
+        $this->set_renderer(array($owner_controller, "render_${slug}_column"));
+    }
+
+    function set_title ($translated_title)
+    {
+        $this->title = $translated_title;
+        return $this;  // Chainable
+    }
+
+    function add_css ($css)
+    {
+        $this->css .= $css;
+        return $this;
+    }
+
+    function set_renderer ($callable)
+    {
+        $this->render = $callable;
+        return $this;
+    }
+
+    function make_sortable ($sort_opts)
+    {
+        $this->sort_opts = $sort_opts;
+        return $this;
+    }
+
+    function hook_after ($after)
+    {
+        $post_type = $this->get_post_type();
+        $this->insert_after = $after;
+        add_action(
+            sprintf('manage_%s_posts_columns', $post_type),
+            array($this, '_filter_posts_columns'));
+
+        add_action(
+            sprintf('manage_%s_posts_custom_column', $post_type),
+            array($this, '_filter_manage_custom_column'),
+            10, 2);
+
+        add_action('admin_head', array($this, '_render_css'));
+
+        // Sorting
+        add_action('pre_get_posts', array($this, '_action_pre_get_posts'));
+        add_filter(
+            sprintf('manage_edit-%s_sortable_columns', $post_type),
+            array($this, '_filter_manage_sortable_columns'));
+
+        return $this;   // Chainable, because why not?
+    }
+
+    protected function get_model_class ()
+    {
+        $controller_class = $this->owner;
+        return $controller_class::get_model_class();
+    }
+
+    protected function get_post_type ()
+    {
+        $model_class = $this->get_model_class();
+        return $model_class::get_post_type();
+    }
+
+    function _filter_posts_columns ($columns)
+    {
+        if (is_int($this->insert_after)) {
+            // https://stackoverflow.com/a/3354804/435004
+            $newcolumns = array_merge(
+                array_slice($columns, 0, $this->insert_after, true),
+                array($this->slug => $this->title),
+                array_slice($columns, $this->insert_after,
+                            count($columns) - $this->insert_after, true));
+            return $newcolumns;
+        } elseif (is_string($this->insert_after)) {
+            $newcolumns = array();
+            foreach ($columns as $col_slug => $descr) {
+                $newcolumns[$col_slug] = $descr;
+                if ($col_slug === $this->insert_after) {
+                    $newcolumns[$this->slug] = $this->title;
+                }
+            }
+            return $newcolumns;
+        } else {
+            wp_die("Unsupported value for ->insert_after: " . var_export($this->insert_after, true));
+        }
+    }
+
+    function _filter_manage_custom_column ($column, $post_id)
+    {
+        if ($column !== $this->slug) return;
+
+        $model_class = $this->get_model_class();
+        $epfl_post = $model_class::get($post_id);
+        if (! $epfl_post) return;
+
+        call_user_func($this->render, $epfl_post);
+    }
+
+    function _filter_manage_sortable_columns ($columns)
+    {
+        if ($this->sort_opts) {
+            $columns[$this->slug] = $this->slug;
+        }
+        return $columns;
+    }
+
+    /**
+     * Honor requests to sort by this column
+     */
+    function _action_pre_get_posts ($query)
+    {
+        if ( ! is_admin() ) return;
+        if (! $this->sort_opts) return;
+        if ($query->get( 'orderby' ) !== $this->slug) return;
+
+        // Here we could examine $this->sort_opts to support sorting
+        // by something other than a meta_key.
+        $query->set('orderby', 'meta_value');
+        $query->set('meta_key', $this->sort_opts['meta_key']);
+    }
+
+    function _render_css ()
+    {
+        if (! $this->css) return;
+        echo '<style>' . $this->css . '</style>';
+        $this->css = null;
+    }
+}
+
+/**
+ * Abstract base class for the controller of a model class whose
+ * instances are streamed from an API (as opposed to typed in manually
+ * from wp-admin).
+ *
+ * This is a "pure static" class; no instances are ever constructed.
+ *
+ * Posts managed by a subclass of StreamPostController are displayed
+ * read-only in the wp-admin area, and are assumed to have a
+ * "homepage" that is external to WordPress (obtained with the
+ * `get_permalink` method in the class returned by @link
+ * get_model_class).
+ */
+abstract class StreamPostController extends CustomPostTypeController
+{
+    /**
+     * Get the labels to display in various places in the UI.
+     *
+     * @return An associative array whose keys are i18n-neutral
+     *         keywords and whose values are translation strings. This
+     *         array gets passed as-is as the 'labels' value to
+     *         WordPress' @link register_post_type, and therefore ought
+     *         to contain like-named keys. Additionally the following
+     *         keys are used by StreamTaxonomyController directly:
+     *
+     * - description: The post type description for wp_admin (passed
+     *                as the `"description"` field to `register_post_type`)
+     *
+     */
+    abstract static function get_human_labels ();
+
+    /**
+     * @return The @link StreamTaxonomy subclass this controller serves.
+     */
+    abstract static function get_taxonomy_class ();
+
+    /**
+     * Filter the arguments before they are passed to Wordpress' @link
+     * register_post_type
+     *
+     * The base class does nothing. Subclasses may want to set e.g.
+     * 'menu_icon' or 'menu_position'.
+     */
+    static function filter_register_post_type (&$args) {
+    }
+
+    static function hook ()
+    {
+        parent::hook();
+        add_action('init', array(get_called_class(), 'register_post_type'));
+
+        plugin_activation_hook(array(get_called_class(), "register_caps"));
+        plugin_deactivation_hook(array(get_called_class(), "deregister_caps"));
+
+        // Behavior of epfl-ws posts on the main site
+        add_filter("post_type_link",
+                   array(get_called_class(), "filter_post_link"), 10, 4);
+
+        // Behavior of epfl-ws posts in the wp-admin area
+        static::configure_rendering_in_edit_form();
+        static::auto_fields_controller()->hook();
+        add_action('admin_init', array(get_called_class(), 'make_subtitles_readonly_in_admin'), 0);
+
+        // Behavior of epfl-ws posts in search results
+        add_filter('pre_get_posts', array(get_called_class(), "pre_get_posts"));
+    }
+
+    private static function auto_fields_controller () {
+        return new AutoFieldsController(self::get_model_class());
+    }
+
+    /**
+     * Make it so that posts of this class exist.
+     *
+     * Under WordPress, almost everything publishable is a post.
+     * register_post_type() is invoked to create a particular flavor
+     * of posts that describe news.
+     */
+    static function register_post_type ()
+    {
+        $taxonomy_class = static::get_taxonomy_class();
+        $taxonomy_slug = $taxonomy_class::get_taxonomy_slug();
+        $post_class = $taxonomy_class::get_post_class();
+        $labels = static::get_human_labels();
+
+        $post_type_settings = array(
+                'labels'             => $labels,
+                'description'        => $labels['description'],
+                'public'             => true,
+                'publicly_queryable' => true,
+                'show_ui'            => true,
+                'show_in_menu'       => true,
+                'query_var'          => true,
+                // ad hoc access control, see (de|)register_caps() below:
+                'capabilities'       => array(
+                    'read'                 => 'read_epfl_ws_posts',
+                    // Name notwithstanding, edit_posts is actually
+                    // the permission to see the list of posts.
+                    'edit_posts'           => 'read_epfl_ws_posts',
+                    'create_posts'         => '__NEVER_PERMITTED__',
+
+                    'edit_post'            => 'edit_epfl_ws_posts',
+                    'edit_private_posts'   => 'edit_epfl_ws_posts',
+                    'edit_published_posts' => 'edit_epfl_ws_posts',
+                    'assign_categories'    => 'edit_epfl_ws_posts',
+                    'assign_post_tags'     => 'edit_epfl_ws_posts',
+                    // One is not normally supposed to delete streamed
+                    // posts manually — This is just an escape hatch
+                    // in case a StreamTaxonomy was deleted and
+                    // referential integrity was breached.
+                    'delete_post'          => 'edit_epfl_ws_posts',
+                    'delete_posts'         => 'edit_epfl_ws_posts',
+                    'delete_private_posts' => 'edit_epfl_ws_posts',
+                    'delete_others_posts'  => 'edit_epfl_ws_posts',
+                ),
+                'has_archive'        => true,
+                'hierarchical'       => false,
+                'taxonomies'         => array($taxonomy_slug, 'category', 'post_tag'),
+                'menu_position'      => 40,
+                'menu_icon'          => isset($menu_icon) ? $menu_icon : '',
+                'supports'           => array('wps_subtitle', 'custom-fields'),
+                'register_meta_box_cb' => array(get_called_class(), 'add_meta_boxes')
+            );
+        static::filter_register_post_type($post_type_settings);
+        register_post_type($post_class::get_post_type(), $post_type_settings);
+    }
+
+    const ROLES_THAT_MAY_VIEW = array('administrator', 'editor', 'author', 'contributor');
+    const ROLES_THAT_MAY_MANAGE = array('administrator', 'editor');
+    const ALL_ROLES = array('administrator', 'editor', 'author', 'contributor', 'subscriber');
+    const CAPS_FOR_VIEWERS = array(
+        'read_epfl_ws_posts'
+    );
+    const ALL_CAPS = array(
+        'read_epfl_ws_posts',
+        'edit_epfl_ws_posts'
+    );
+    // We have used these in the past, and need to clean them up.
+    const OBSOLETE_CAPS = array(
+        'read_epfl_actus',
+        'edit_epfl_actus',
+        'read_epfl_actu',
+        'delete_epfl_actu'
+    );
+
+    /**
+     * Register permissions ("capabilities") on epfl-ws posts.
+     *
+     * Called at plugin activation time.
+     *
+     * The permission map is made so that administrators and editors can view and
+     * delete epfl-ws posts, but not edit them.
+     */
+    static function register_caps ()
+    {
+        foreach (self::ROLES_THAT_MAY_VIEW as $role_name) {
+            $role = get_role($role_name);
+            foreach (self::CAPS_FOR_VIEWERS as $cap) {
+                $role->add_cap($cap);
+            }
+        }
+        foreach (self::ROLES_THAT_MAY_MANAGE as $role_name) {
+            $role = get_role($role_name);
+            foreach (self::ALL_CAPS as $cap) {
+                $role->add_cap($cap);
+            }
+        }
+    }
+
+    /**
+     * De-register permissions ("capabilities") on epfl-ws posts.
+     *
+     * Called at plugin deactivation time.
+     */
+    static function deregister_caps ()
+    {
+        foreach (self::ALL_ROLES as $role_name) {
+            $role = get_role($role_name);
+            foreach (self::ALL_CAPS as $cap) {
+                $role->remove_cap($cap);
+            }
+            foreach (self::OBSOLETE_CAPS as $cap) {
+                $role->remove_cap($cap);
+            }
+        }
+    }
+
+    /**
+     * Serve the permalink from actu.epfl.ch / memento.epfl.ch instead of our own.
+     *
+     * Mostly, we keep the full text of the article in-database just for the search engine.
+     */
+    static function filter_post_link ($orig_link, $post, $unused_leavename, $unused_is_sample)
+    {
+        $epfl_post = static::get_model_class()::get($post);
+        if (! $epfl_post) return $orig_link;
+        $true_permalink = $epfl_post->get_permalink();
+        return $true_permalink ? $true_permalink : $orig_link;
+    }
+
+    static function configure_rendering_in_edit_form ()
+    {
+        $this_class = get_called_class();
+        add_action("edit_form_after_title", function ($wp_post) use ($this_class) {
+                $epfl_post = $this_class::get_model_class()::get($wp_post);
+                if (! $epfl_post) return;
+               $this_class::render_readonly_in_edit_form($epfl_post);
+            });
+
+    }
+
+    function render_readonly_in_edit_form ($epfl_post)
+    {
+        $wp_post = $epfl_post->wp_post();
+        $permalink = get_permalink($wp_post);
+        global $post;
+        $subtitle = function_exists("get_the_subtitle") ? get_the_subtitle($post, "", "", false) : null;
+        ?>
+    <h1><?php echo $wp_post->post_title; ?></h1>
+    <?php if ($subtitle) : ?><h2><?php echo $subtitle; ?></h2><?php endif; ?>
+	<div id="edit-slug-box" class="hide-if-no-js">
+    <?php if (method_exists($epfl_post, "get_image_url")): ?>
+    <img class="epfl-ws-thumbnail" src="<?php echo $epfl_post->get_image_url() ?>"/>
+    <?php endif; ?>
+    <p><b>Permalink:</b> <a href="<?php echo $permalink; ?>"><?php echo $permalink; ?></a></p>
+    <?php echo $wp_post->post_content; ?>
+	</div>
+        <?php
+    }
+
+    /**
+     * Make subtitles read-only by preventing WP Subtitles from
+     * initializing in the case of epfl-ws posts.
+     */
+    static function make_subtitles_readonly_in_admin ()
+    {
+		$post_type = '';
+
+		if ( isset( $_REQUEST['post_type'] ) ) {
+			$post_type = sanitize_text_field( $_REQUEST['post_type'] );
+		} elseif ( isset( $_GET['post'] ) ) {
+			$post_type = get_post_type( absint( $_GET['post'] ) );
+        }
+        if ($post_type !== static::get_model_class()::get_post_type()) return;
+
+        remove_action('admin_init', array( 'WPSubtitle_Admin', '_admin_init' ) );
+        // Add back the subtitle column for the list view:
+        add_filter( 'manage_edit-' . $post_type . '_columns', array( 'WPSubtitle_Admin', 'manage_subtitle_columns' ) );
+        add_action( 'manage_' . $post_type . '_posts_custom_column', array( 'WPSubtitle_Admin', 'manage_subtitle_columns_content' ), 10, 2 );
+    }
+
+    function pre_get_posts ($query) {
+		$qv = &$query->query_vars;
+
+        if (! is_admin() && $query->is_main_query()) {
+            // Loosely based on https://wordpress.stackexchange.com/q/181803/132235
+            $post_types = $query->get('post_type');
+            if ($post_types === 'post') {
+                $post_types = ['post'];
+            }
+            if (is_array($post_types) &&
+                (false === array_search(static::get_model_class()::get_post_type(), $post_types))) {
+                array_push($post_types, static::get_model_class()::get_post_type());
+                $query->set('post_type', $post_types);
+            }
+        }
+        return $query;
+    }
+
+    /**
+     * @return The model class for this controller
+     */
+    static function get_model_class ()
+    {
+        $taxonomy_class = static::get_taxonomy_class();
+        return $taxonomy_class::get_post_class();
+    }
+
+    /**
+     * Called to add meta boxes on an "edit" page in wp-admin.
+     *
+     * The base class only puts @link AutoFieldsController in gear.
+     * Subclasses may want to override this to add more meta boxes.
+     */
+    static function add_meta_boxes ()
+    {
+        static::auto_fields_controller()->add_meta_boxes();
+    }
+}
+
+/**
+ * Configuration UI and WP callbacks for an APIChannelPost class.
+ *
+ * This is a "pure static" class; no instances are ever constructed.
+ *
+ * Compared to the parent class @link StreamPostController, this class
+ * adds support for server-side image resizing; also, it arranges to
+ * show thumbnails and metadata (i.e. max image size) in the wp-admin
+ * area.
+ */
+abstract class APIChannelPostController extends StreamPostController
+{
+    /**
+     * Overridden to deal with thumbnails.
+     */
+    static function hook ()
+    {
+        parent::hook();
+
+        add_filter("post_thumbnail_html",
+                   array(get_called_class(), "filter_post_thumbnail_html"), 10, 5);
+        static::add_thumbnail_column();
+        add_action("admin_init",
+                   array(get_called_class(), "maybe_activate_auto_category_widget"));
+    }
+
+    /**
+     * Arrange for get_the_post_thumbnail() to return the external thumbnail for epfl-ws posts.
+     *
+     * This is set as a filter for WordPress' @link
+     * post_thumbnail_html hook. Note that it isn't as easy to hijack
+     * the return value of @link get_the_post_thumbnail_url in this
+     * way (but you can always call the @link get_image_url method on
+     * an APIChannelPost instance).
+     *
+     * @return An <img /> tag with suitable attributes
+     *
+     * @param $orig_html The HTML that WordPress intended to return as
+     *                   the picture (unused, as it will typically be
+     *                   empty — epfl-ws objects lack attachments)
+     *
+     * @param $post_id   The post ID to compute the <img /> for
+     *
+     * @param $size      The requested size, in WordPress notation (either the
+     *                   name of a well-known or declared size, or a [$height,
+     *                   $width] array)
+     *
+     * @param $attr      Associative array of HTML attributes. If "class" is
+     *                   not specified, the default "wp-post-image" is used
+     *                   to match the WordPress behavior for local (attached)
+     *                   images.
+     */
+    static function filter_post_thumbnail_html ($orig_html, $post_id, $unused_thumbnail_id,
+                                                $size, $attr)
+    {
+        $epfl_post = static::get_model_class()::get($post_id);
+        if (! $epfl_post) return $orig_html;
+
+        // Actu and Memento images are resizable server-side
+        // TODO: we could actually interpret $size in a much finer way
+        if (($size === "full" || $size === "large")) {
+            $src = $epfl_post->get_image_url("2048x1152");
+        } else {
+            $src = $epfl_post->get_image_url();
+        }
+        if (! $src) return $orig_html;
+
+        if (! $attr) $attr = array();
+        if (! $attr["class"]) {
+            $attr["class"] = "wp-post-image";
+        }
+        $attrs = "";
+        foreach ( $attr as $name => $value ) {
+            $attrs .= sprintf(" %s=\"%s\"", $name, esc_attr($value));
+        }
+        return sprintf("<img src=\"%s\" %s/>", $src, $attrs);
+    }
+
+    /**
+     * Overridden to show image metadata in the thumbnail column.
+     *
+     * This class appends size informations below $img. Subclasses
+     * may override this to render the thumbnail differently.
+     *
+     * @param $epfl_post An instance of the class returned by @link
+     * get_model_class
+     */
+    static function render_thumbnail_column ($epfl_post)
+    {
+        parent::render_thumbnail_column($epfl_post);
+        if ($orig_size = $epfl_post->get_max_size()) {
+            printf("<p>Size: %dx%d</p>", $orig_size["width"], $orig_size["height"]);
+        }
+    }
+
+    static function maybe_activate_auto_category_widget ()
+    {
+        global $typenow;
+        if ($typenow !== static::get_post_type()) return;
+        require_once(__DIR__ . "/auto-category-widget.inc");
+        \EPFL\WS\AutoCategoryWidget\AutoCategoryWidgetController::hook();
+    }
+}
+
+/**
+ * A shortcode occurrence.
+ *
+ * A subclass represents one shortcode. Instances are created for each
+ * occurrence of the shortcode.
+ */
+abstract class Shortcode
+{
+    function hook ()
+    {
+        add_shortcode(static::get_name(), function ($atts, $content = null) {
+            $thisclass = get_called_class();
+           $that = new $thisclass($atts, $content);
+            return $that->render();
+        });
+        if (is_admin()) {
+            add_action("admin_print_footer_scripts",
+                       array(get_called_class(), '_button_script'));
+        }
+    }
+
+    static abstract function get_name ();
+
+    function __construct ($attrs, $content = null)
+    {
+        $this->attrs = $this->_normalize_attrs($attrs);
+        $this->content = $content;
+    }
+
+    abstract function render ();
+
+    function _button_script ()
+    {
+        if(! wp_script_is("quicktags")) { return; }
+        static::render_button_script();
+    }
+
+    /**
+     * Render the JS script that calls QTags.addButton() so as to
+     * show a helper button in TinyMCE for this shortcode.
+     *
+     * The base class does nothing.
+     */
+    function render_button_script ()
+    {
+    }
+
+    function _normalize_attrs ($attrs)
+    {
+        // normalize attribute keys, lowercase
+        $atts = array_change_key_case((array)$atts, CASE_LOWER);
+        return shortcode_atts(static::get_attr_defaults(), $attrs,
+                              static::get_name());
+    }
+}
+
+/**
+ * The rendering helper for a shortcode that returns a list of results.
+ *
+ * Themes can customize that rendering either by calling @link
+ * add_filter on "epfl_shortcode_${slug}_list_html" (which overrides
+ * the entire class' behavior), or by calling @link add_filter one or
+ * more of the following:
+ *
+ * - epfl_shortcode_${slug}_list_html_no_results
+ *
+ * - epfl_shortcode_${slug}_list_html_start
+ *
+ * - epfl_shortcode_${slug}_list_html_item
+ *
+ * - epfl_shortcode_${slug}_list_html_end
+ *
+ */
+abstract class ListTemplatedShortcodeView
+{
+    abstract function get_slug ();
+
+    abstract function item_as_html ($item);
+
+    function __construct ($shortcode_attrs)
+    {
+        $this->shortcode_attrs = $shortcode_attrs;
+    }
+
+    function get_no_results_msg ()
+    {
+
+    }
+
+    function no_results_as_html ()
+    {
+        $slug = $this->get_slug();
+        return apply_filters(
+            "epfl_shortcode_${slug}_list_html_no_results",
+            $this->_no_results_as_html_default(),
+            $this->shortcode_attrs);
+    }
+
+    protected function _no_results_as_html_default ()
+    {
+        $classes = implode(" ", $this->get_outer_div_classes());
+        $msg = __x("No results", "ListShortcode");
+        return "<div class=\"$classes no-results\">$msg</div>";
+    }
+
+    public function as_html ($items_list)
+    {
+        $slug = $this->get_slug();
+
+        if (has_filter("epfl_shortcode_${slug}_list_html")) {
+            return apply_filters("epfl_shortcode_${slug}_list_html",
+                                 "",
+                                 $items_list, $this->shortcode_attrs);
+        }
+        $this->_set_results($items_list);
+        if (! $this->_has_results()) {
+            return $this->no_results_as_html();
+        }
+
+        $classes = implode(" ", $this->get_outer_div_classes());
+        $html = apply_filters(
+            "epfl_shortcode_${slug}_list_html_start",
+            "<div class=\"$classes has-results\">",
+            $this->shortcode_attrs);
+        while($this->_has_results()) {
+            $item = $this->_next_result();
+            $html .= apply_filters(
+                "epfl_shortcode_${slug}_list_html_item",
+                $this->item_as_html($item), $this->shortcode_attrs, $item);
+        }
+        $html .= apply_filters("epfl_shortcode_${slug}_list_html_end", "</div>",
+                               $this->shortcode_attrs);
+        return $html;
+    }
+
+    protected function _set_results ($item_list)
+    {
+        $this->_items = $item_list;
+    }
+
+    protected function _has_results ()
+    {
+        return count($this->_items) > 0;
+    }
+
+    protected function _next_result ()
+    {
+        return array_shift($this->_items);
+    }
+
+    protected function get_outer_div_classes ()
+    {
+        $slug = $this->get_slug();
+        return array("epfl-shortcode-list", "epfl-shortcode-$slug");
+    }
+}
+
+/**
+ * The rendering helper for a shortcode that returns a list of posts.
+ */
+abstract class PostListShortcodeView extends ListTemplatedShortcodeView
+{
+    public function item_as_html ($wp_post)
+    {
+        $post_type = $wp_post->post_type;
+        $html .= sprintf('<div class="epfl-ws-shortcode %s" id="%s">', $post_type, $wp_post->ID);
+
+        if ($url = get_the_permalink($wp_post)) {
+            $linkpre = sprintf('<a href="%s">', $url);
+            $linkpost = "</a>";
+        } else {
+            $linkpre = $linkpost = "";
+        }
+
+        if ($wp_post->post_title) {
+            $html .= '<h2>' . $linkpre . $wp_post->post_title . $linkpost . '</h2>';
+        }
+        if (function_exists("get_the_subtitle") and
+            ($subtitle = get_the_subtitle($wp_post, "", "", false))) {
+            $html .= '<p class=\"subtitle\">' . $linkpre . $subtitle . $linkpost . '</p>';
+        }
+
+        if ($img = get_the_post_thumbnail($wp_post)) {
+            $html .= $linkpre . $img . $linkpost;
+        }
+
+        if ($excerpt = get_the_excerpt($wp_post)) {
+            $html .= sprintf('<p class="excerpt">%s</p>', $excerpt);
+        }
+        $html .= '</div>';
+        return $html;
+    }
+}
+
+/**
+ * The view code for a shortcode whose output consists of the elements
+ * returned by a WP_Query object.
+ *
+ * The rendering is compatible with the WordPress loop and
+ * Understrap-style partial templates in the loop-templates/
+ * subdirectory of the theme. This means that, in addition to the
+ * filter-based customization proposed by the grandparent class @link
+ * ListTemplatedShortcodeView, the rendering of a shortcode that uses
+ * a subclass of WPQueryShortcodeView can be customized using files
+ * whose names are like `loop-templates/content-${post_format}.php`,
+ * `loop-templates/content-${post_type}.php` and
+ * `loop-templates/content.php` (by decreasing order of precedence, in
+ * case the result set is not empty); or
+ * `loop-templates/content-none.php`, when there are no results.
+ *
+ * @see https://understrap.com/
+ */
+abstract class WPQueryShortcodeView extends PostListShortcodeView
+{
+    /**
+     * @param $q a WP_Query object (instead of a list of items in the
+     * parent class)
+     */
+    public function as_html ($q)
+    {
+        $in_the_loop = new _InTheLoopHelper($q);
+        try {
+            $in_the_loop->enter();
+            return parent::as_html($q);
+        } finally {
+            $in_the_loop->leave();
+        }
+    }
+
+    protected function _set_results ($q)
+    {
+        $this->q = $q;
+    }
+
+    protected function _has_results ()
+    {
+        return $this->q->have_posts();
+    }
+
+    protected function _next_result ()
+    {
+        $this->q->the_post();
+        global $post;
+        return $post;
+    }
+
+    const UNDERSTRAP_LOOP_TEMPLATE_SLUG = "loop-templates/content";
+
+    protected function has_template ($short_name) {
+        if ($short_name) {
+            $template_filename = self::UNDERSTRAP_LOOP_TEMPLATE_SLUG . "-" . $short_name . ".php";
+        } else {
+            $template_filename = self::UNDERSTRAP_LOOP_TEMPLATE_SLUG . ".php";
+        }
+        return locate_template($template_filename);
+    }
+
+    protected function render_template ($short_name) {
+        try {
+            ob_start();
+            get_template_part(
+                self::UNDERSTRAP_LOOP_TEMPLATE_SLUG, $short_name);
+            return ob_get_contents();  // NOT ob_get_clean(), lest the finally
+                                       // block close one ob too many
+        } finally {
+            ob_end_clean();
+        }
+    }
+
+    protected function _no_results_as_html_default ()
+    {
+        if ($this->has_template("none")) {
+            return $this->render_template("none");
+        } else {
+            return parent::_no_results_as_html_default();
+        }
+    }
+
+    public function item_as_html ($wp_post)
+    {
+        // ->_next_result() already took care of setting WordPress'
+        // global loop variables
+        foreach (array(
+            get_post_format($wp_post),
+            $wp_post->post_type,
+        ) as $maybe_template) {
+            if ($maybe_template && $this->has_template($maybe_template)) {
+                return $this->render_template($maybe_template);
+            }
+        }
+        if ($this->has_template(null)) {
+            return $this->render_template(null);
+        }
+        return parent::item_as_html($wp_post);
+    }
+}
