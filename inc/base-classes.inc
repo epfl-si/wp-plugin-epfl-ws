@@ -826,7 +826,9 @@ abstract class APIChannelPost extends UniqueKeyTypedPost
     static protected function _insert_by_unique_keys ($unique_keys)
     {
         $id = parent::_insert_by_unique_keys($unique_keys);
-        pll_set_post_language($id, $unique_keys[self::LANGUAGE_META]);
+        if (function_exists("pll_set_post_language")) {
+            pll_set_post_language($id, $unique_keys[self::LANGUAGE_META]);
+        }
         return $id;
     }
 
