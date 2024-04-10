@@ -166,7 +166,7 @@ class MementoStreamController extends \EPFL\WS\Base\StreamTaxonomyController
 
     static function get_placeholder_api_url ()
     {
-        return "https://memento.epfl.ch/api/jahia/mementos/sti/events/en/?format=json";
+        return "https://memento.epfl.ch/api/v1/mementos/264/events/?lang=en&format=json";
     }
 }
 
