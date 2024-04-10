@@ -102,8 +102,8 @@ class PersonCardShortCode {
       $default .= "    <h5 class=\"card-title\">" .  $person->get_short_title_and_full_name() . "</h5>\n";
       $default .= "    <div style=\"border-top:1px solid #5A5A5A !important; padding 0px !important; margin 0px !important;\">\n";
       $default .=        ($function == 'no') ? ''        :
-                         $function           ? $function :
-                         $person->get_title_as_text();
+                         ( $function           ? $function :
+                          $person->get_title_as_text() );
       $default .=        "\n";
       $default .= "      <div class=\"person-contact\" style=\"float:right\">\n";
       if ($icon[0]) {
