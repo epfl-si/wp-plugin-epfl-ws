@@ -1,11 +1,10 @@
 <?php
 /*
  * File name:   epfl-ws/inc/epfl-ws.inc
- * Description: This file regroups common function for EPFL WS
- * Version:     0.1
- * Author:      STI-IT Web
- * Author URI:  mailto:stiitweb@groupes.epfl.ch
- * License:     MIT License / Copyright (c) 2017-2018 EPFL ⋅ STI ⋅ IT
+ * Description: This file regroups common functions for EPFL WS
+ * Author:      The EPFL WordPress Brotherhood
+ * Author URI:  mailto:wwp-members@groupes.epfl.ch
+ * License:     MIT License / Copyright (c) 2017-2024 EPFL
  */
 
 namespace EPFL\WS;

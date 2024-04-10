@@ -11,7 +11,7 @@
     "type": "git",
     "url": "git+https://github.com/epfl-si/wp-plugin-epfl-ws.git"
   },
-  "author": "STI-IT Web <stiitweb@epfl.ch>",
+  "author": "The EPFL WordPress Brotherhood <wwp-members@epfl.ch>",
   "license": "ISC",
   "bugs": {
     "url": "https://github.com/epfl-si/wp-plugin-epfl-ws/issues"

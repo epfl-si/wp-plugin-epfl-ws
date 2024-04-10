@@ -4,10 +4,10 @@
  * Plugin URI:  https://github.com/epfl-si/wp-plugin-epfl-ws
  * Description: Integrate EPFL Web Services on your WordPress site. Integrates with <a href="https://wordpress.org/plugins/wp-subtitle/">WP subtitle</a> if installed.
 
- * Version:     0.5
- * Author:      STI-IT Web
+ * Version:     0.6
+ * Author:      The EPFL WordPress Brotherhood
  * Author URI:  mailto:stiitweb@groupes.epfl.ch
- * License:     MIT License / Copyright (c) 2017-2018 EPFL ⋅ STI ⋅ IT
+ * License:     MIT License / Copyright (c) 2017-2024 EPFL
  *
  * Usage:
  *   - [actu]
