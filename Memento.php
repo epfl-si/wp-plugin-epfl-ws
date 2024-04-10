@@ -83,17 +83,36 @@ class Memento extends \EPFL\WS\Base\APIChannelPost
                   "event_theme", "event_speaker",
                   "event_place_and_room", "event_url_place_and_room",
                   "event_canceled_reason", "translation_id"]
-                 as $keep_this_as_meta)
+                 as $meta)
         {
-            if ($api_result[$keep_this_as_meta]) {
-                $this->_post_meta[$keep_this_as_meta] = $api_result[$keep_this_as_meta];
+            if (@$api_result[$meta]) {
+                $this->_post_meta[$meta] = $api_result[$meta];
+                continue;
+            }
+            $api_v1_meta = $this->_as_api_v1_meta($meta);
+            if (@$api_result[$api_v1_meta]) {
+                $this->_post_meta[$meta] = $api_result[$api_v1_meta];
+            }
+        }
+        foreach (["event_url", "visual_url", "visual_large_url", "visual_maxsize_url"] as $api_v1_only_meta) {
+            if (array_key_exists($api_v1_only_meta, $api_result)) {
+                $this->_post_meta[$api_v1_only_meta] = $api_result[$api_v1_only_meta];
             }
         }
         foreach (["event_is_internal", "event_canceled"]
-        as $keep_this_as_bool_meta) {
-            $this->_post_meta[$keep_this_as_bool_meta] = (
-                strtolower($api_result[$keep_this_as_bool_meta]) === "true");
+        as $bool_meta) {
+            $api_v1_bool_meta = $this->_as_api_v1_meta($meta);
+            if (array_key_exists($bool_meta, $api_result)) {
+                $value = $api_result[$bool_meta];
+            } else {
+                $value = @$api_result[$api_v1_bool_meta];
+            }
+            $this->_post_meta[$bool_meta] = strtolower($value) === "true";
         }
+    }
+
+    private function _as_api_v1_meta ($jahia_meta) {
+        return preg_replace("/^event_/", "", $jahia_meta);
     }
 
     public function get_venue ()
