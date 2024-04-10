@@ -356,14 +356,14 @@ class LabController extends CustomPostTypeController
     static function strikethrough_inactive_labs ()
     {
         add_filter('post_class', function($classes, $class, $post_id) {
-            if (! is_admin()) { return; }
-            if (! ($lab = Lab::get($post_id))) { return; }
-            if ($lab->is_active()) { return; }
+            if (! is_admin()) { return $classes; }
+            if (! ($lab = Lab::get($post_id))) { return $classes; }
+            if ($lab->is_active()) { return $classes; }
             array_push($classes, "lab-inactive");
             return $classes;
         }, 10, 3);
 
-        if (self::$_css_strikethrough_inactive_labs_sent) { return; }
+        if (self::$_css_strikethrough_inactive_labs_sent) { return $classes; }
         $_css_strikethrough_inactive_labs_sent = true;
         add_action('admin_head', function() {
             ?>
@@ -374,6 +374,7 @@ tr.lab-inactive {
 </style>
 <?php
         });
+        return $classes;
     }
 }
 
