@@ -1676,8 +1676,10 @@ abstract class StreamPostController extends CustomPostTypeController
 
         remove_action('admin_init', array( 'WPSubtitle_Admin', '_admin_init' ) );
         // Add back the subtitle column for the list view:
-        add_filter( 'manage_edit-' . $post_type . '_columns', array( 'WPSubtitle_Admin', 'manage_subtitle_columns' ) );
-        add_action( 'manage_' . $post_type . '_posts_custom_column', array( 'WPSubtitle_Admin', 'manage_subtitle_columns_content' ), 10, 2 );
+        if (class_exists("WPSubtitle")) {
+            add_filter( 'manage_edit-' . $post_type . '_columns', array( 'WPSubtitle_Admin', 'manage_subtitle_columns' ) );
+            add_action( 'manage_' . $post_type . '_posts_custom_column', array( 'WPSubtitle_Admin', 'manage_subtitle_columns_content' ), 10, 2 );
+        }
     }
 
     static function pre_get_posts ($query) {
