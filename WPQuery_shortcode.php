@@ -40,7 +40,7 @@ class WPQueryShortcode extends Shortcode
         );
     }
 
-    function render_button_script ()
+    static function render_button_script ()
     {
         ?>
           <script type="text/javascript">

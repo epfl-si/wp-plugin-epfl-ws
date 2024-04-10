@@ -38,7 +38,7 @@ require_once(__DIR__ . "/Person.php");
 use \EPFL\WS\Persons\Person;
 
 class PersonCardShortCode {
-  function hook() {
+  static function hook() {
     add_shortcode('person-card', function($atts, $content=null, $tag='') {
         $shortcode = new PersonCardShortCode();
         return $shortcode->wp_shortcode($atts, $content, $tag);

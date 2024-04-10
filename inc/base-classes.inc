@@ -830,7 +830,7 @@ abstract class APIChannelPost extends UniqueKeyTypedPost
         return $id;
     }
 
-    public function _is_polylang_enabled_on_custom_post_type ()
+    public static function _is_polylang_enabled_on_custom_post_type ()
     {
         global $polylang;
         if ($polylang && ($types = $polylang->model->get_translated_post_types())) {
@@ -1096,7 +1096,7 @@ abstract class CustomPostTypeController extends Controller
         return $_columns[$slug];
     }
 
-    function get_post_type ()
+    static function get_post_type ()
     {
         $model_class = static::get_model_class();
         return $model_class::get_post_type();
@@ -1640,7 +1640,7 @@ abstract class StreamPostController extends CustomPostTypeController
 
     }
 
-    function render_readonly_in_edit_form ($epfl_post)
+    static function render_readonly_in_edit_form ($epfl_post)
     {
         $wp_post = $epfl_post->wp_post();
         $permalink = get_permalink($wp_post);
@@ -1680,7 +1680,7 @@ abstract class StreamPostController extends CustomPostTypeController
         add_action( 'manage_' . $post_type . '_posts_custom_column', array( 'WPSubtitle_Admin', 'manage_subtitle_columns_content' ), 10, 2 );
     }
 
-    function pre_get_posts ($query) {
+    static function pre_get_posts ($query) {
 		$qv = &$query->query_vars;
 
         if (! is_admin() && $query->is_main_query()) {
@@ -1831,7 +1831,7 @@ abstract class APIChannelPostController extends StreamPostController
  */
 abstract class Shortcode
 {
-    function hook ()
+    static function hook ()
     {
         add_shortcode(static::get_name(), function ($atts, $content = null) {
             $thisclass = get_called_class();
@@ -1854,7 +1854,7 @@ abstract class Shortcode
 
     abstract function render ();
 
-    function _button_script ()
+    static function _button_script ()
     {
         if(! wp_script_is("quicktags")) { return; }
         static::render_button_script();
@@ -1866,7 +1866,7 @@ abstract class Shortcode
      *
      * The base class does nothing.
      */
-    function render_button_script ()
+    static function render_button_script ()
     {
     }
 

@@ -110,7 +110,7 @@ class MementoShortcode extends Shortcode
     /*
      * Add the Memento button to TinyMCE
      */
-    function render_button_script ()
+    static function render_button_script ()
     {
         ?>
           <script type="text/javascript">
