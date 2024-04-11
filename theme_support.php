@@ -79,7 +79,7 @@ function format_event_times ($event, $formats) {
         } else {
           // This $format assumes that $start and $end render the same
           // at this $tok, which they don't. Try the next format:
-          break 2;
+          continue 2;
         }
       }
     }
